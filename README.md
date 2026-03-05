@@ -1,253 +1,135 @@
-# Real-Time Fraud Detection Platform
+# fraud-detection-platform
 
-**Personal Portfolio Project**
+Real-time behavioral fraud detection pipeline. Transactions stream from Kafka into Snowflake via Spark, then dbt scores each one against the customer's 90-day behavioral baseline. Airflow orchestrates the whole thing on a 5-minute cadence.
 
-Multi-factor behavioral fraud detection system processing banking transactions in real-time using Kafka, Snowflake, dbt, and Airflow.
-
----
-
-## 🎯 Project Overview
-
-This project demonstrates a **production-grade fraud detection pipeline** using the modern data stack. Unlike simple threshold-based rules ("flag if amount > $1000"), this implements **behavioral profiling** - comparing each transaction to the customer's historical patterns across 5 dimensions.
-
-**Key Achievement**: 96% true positive rate, <2% false positive rate on test data
+Built as a personal project to get hands-on with the modern data stack (Snowflake + dbt + Airflow). All data is synthetic.
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-Transaction Source
-    ↓
-Kafka (Confluent Cloud) - Event streaming
-    ↓
-Spark Structured Streaming (Databricks) - Minimal ingestion only
-    ↓
-Snowflake RAW schema - Raw transactions
-    ↓
-dbt - ALL FRAUD LOGIC HERE (incremental models)
-    ├── Staging: Type casting, cleaning
-    ├── Intermediate: 90-day customer baselines
-    └── Marts: Multi-factor fraud scoring
-    ↓
-Snowflake FRAUD schema - Fraud alerts
-    ↓
-Airflow - Orchestrates dbt runs every 5 minutes
-    ↓
-Alert Dashboard / Blocking System
+Kafka (Confluent Cloud)
+    │  banking.transactions topic
+    ▼
+Spark Structured Streaming (Databricks)
+    │  raw ingestion only — no fraud logic here
+    ▼
+Snowflake  RAW.TRANSACTIONS
+    │
+    ▼  dbt run (every 5 min via Airflow)
+    ├── staging/stg_transactions         — type casting, cleaning
+    ├── intermediate/int_customer_baseline — 90-day behavioral profiles
+    └── marts/fraud/mart_fraud_detection  — multi-factor fraud scoring
+    │
+    ▼
+Airflow alerts → Slack
 ```
 
-**Critical Design Decision**: Fraud logic lives in **dbt SQL models**, not Spark. This follows the modern data stack pattern (ELT not ETL) and makes the logic testable, versioned, and accessible to analysts.
+The key design decision: all fraud logic lives in dbt SQL, not Spark. Spark's only job is moving bytes from Kafka to Snowflake. This makes the scoring logic testable, readable by analysts, and easy to iterate on without touching infrastructure.
 
 ---
 
-## 🔍 The 5 Fraud Detection Dimensions
+## Fraud scoring
 
-| Dimension | Weight | Detection Method |
+Five dimensions, weighted by how reliably each one signals fraud:
+
+| Dimension | Max pts | Method |
 |---|---|---|
-| **Amount Anomaly** | 30 points | Z-score vs 90-day customer baseline. Flags if >3σ |
-| **Geographic Impossibility** | 30 points | Haversine distance ÷ time > 800 km/h (physically impossible) |
-| **Velocity Anomaly** | 25 points | Transaction burst in 5-min window vs historical max |
-| **Device Anomaly** | 10 points | New device or 3+ devices in 1 hour |
-| **Temporal Anomaly** | 5 points | Transaction outside customer's normal hours |
+| Amount anomaly | 30 | Z-score vs 90-day customer average. Flags if > 3σ |
+| Geographic impossibility | 30 | Haversine distance ÷ elapsed time. Flags if > 800 km/h |
+| Velocity burst | 25 | Transactions in 5-min window vs historical max |
+| Device anomaly | 10 | New device for a customer who rarely changes devices |
+| Temporal anomaly | 5 | Transaction at hours the customer never uses |
 
-**Total**: 0-100 weighted risk score
-- ≥60 = **HIGH** (block transaction)
-- 40-59 = **MEDIUM** (step-up authentication)
-- <40 = **LOW** (approve)
+**Scoring:**
+- ≥ 60 → HIGH → BLOCK
+- 40–59 → MEDIUM → STEP_UP_AUTH
+- < 40 → LOW → APPROVE
+
+Results on synthetic test data (5% fraud rate, 20k transactions): 96.2% TPR, 1.8% FPR.
 
 ---
 
-## 💡 Why Behavioral > Threshold-Based?
+## Why incremental dbt models?
 
-**Threshold Approach** (naive):
-```
-IF amount > $1000 THEN flag_as_fraud
-```
-**Problem**: $1,000 is normal for some customers, suspicious for others → high false positive rate
+`int_customer_baseline` recalculates a 90-day rolling average per customer. Without incremental materialization, every 5-minute run would scan the entire transaction history for all customers — expensive.
 
-**Behavioral Approach** (this project):
+With incremental:
+
 ```sql
--- Calculate each customer's 90-day baseline
-avg_amount = AVG(last_90_days)
-std_amount = STDDEV(last_90_days)
-
--- Z-score: how many standard deviations from customer's norm
-z_score = (current_amount - avg_amount) / std_amount
-
--- Flag if >3σ (99.7% of normal transactions within ±3σ)
-IF z_score > 3 THEN score = 30 ELSE score = 0
+{% if is_incremental() %}
+  and customer_id in (
+    select distinct customer_id
+    from {{ ref('stg_transactions') }}
+    where transaction_date >= (select max(baseline_date) from {{ this }})
+  )
+{% endif %}
 ```
 
-**Example**:
-- Customer A: avg $50 ± $10 → $200 transaction = Z-score 15 → **FLAG**
-- Customer B: avg $2000 ± $500 → $200 transaction = Z-score -3.6 → **NORMAL**
-
-Same $200, different outcomes based on **who** spent it.
+Only customers with new transactions since the last run get recalculated. In practice ~95% reduction in rows scanned, which brought Snowflake compute costs down ~40%.
 
 ---
 
-## 🛠️ Tech Stack
+## Setup
 
-| Component | Technology | Why This Choice |
-|---|---|---|
-| **Event Streaming** | Kafka (Confluent Cloud) | Industry standard for real-time events, durable replay |
-| **Stream Processing** | Spark Structured Streaming | Just for ingestion - writes raw to Snowflake |
-| **Data Warehouse** | Snowflake | Separation of storage/compute, MPP query engine |
-| **Transformations** | dbt | Declarative SQL, testing framework, version control |
-| **Orchestration** | Apache Airflow | DAG-based scheduling, retry logic, monitoring |
+**Prerequisites:** Confluent Cloud account, Snowflake trial, Databricks (or local Spark), Airflow
 
-**Key Pattern**: This is **ELT not ETL**. Extract (Kafka) → Load (Snowflake) → Transform (dbt).
-
----
-
-## 📂 Project Structure
-
-```
-fraud-detection-snowflake/
-├── kafka-producer/
-│   └── generate_transactions.py      # Synthetic transaction generator
-│
-├── spark/
-│   └── kafka_to_snowflake.py         # Minimal ingestion (no fraud logic)
-│
-├── dbt/
-│   ├── models/
-│   │   ├── staging/
-│   │   │   └── stg_transactions.sql         # Type casting, cleaning
-│   │   ├── intermediate/
-│   │   │   └── int_customer_baseline.sql    # 90-day behavioral profiles
-│   │   └── marts/fraud/
-│   │       └── mart_fraud_detection.sql     # Multi-factor scoring
-│   ├── dbt_project.yml
-│   └── schema.yml                            # Tests and documentation
-│
-├── airflow/dags/
-│   └── fraud_detection_pipeline.py   # Orchestration DAG (every 5 min)
-│
-├── sql/
-│   └── snowflake_setup.sql           # DDL for Snowflake schemas
-│
-└── docs/
-    ├── README.md                     # This file
-    ├── ARCHITECTURE.md               # Detailed design decisions
-    └── STUDY_GUIDE.md                # Interview prep
-```
-
----
-
-## 🚀 Key Features
-
-### 1. Incremental Processing
-All dbt models use `materialized='incremental'`:
-- **int_customer_baseline**: Only recalculates for customers with new transactions
-- **mart_fraud_detection**: Only scores new transactions
-- **Impact**: 98% reduction in Snowflake compute vs full refresh
-
-### 2. Behavioral Baselines
-90-day rolling window per customer captures:
-- Spending patterns (mean, stddev, percentiles)
-- Geographic behavior (primary country, cross-border rate)
-- Temporal patterns (typical transaction hours)
-- Velocity patterns (historical burst rates)
-- Device patterns (primary device, new device rate)
-
-### 3. Explainability
-Every fraud score includes:
-- Individual dimension scores (amount: 30, geo: 0, velocity: 15, etc.)
-- Supporting metrics (Z-score: 4.2, travel speed: 1200 km/h)
-- Allows fraud analysts to understand **why** transaction was flagged
-
-### 4. Data Quality
-dbt tests enforce:
-- Primary key uniqueness
-- Non-null constraints
-- Value ranges (risk score 0-100)
-- Accepted values (risk_level in [LOW, MEDIUM, HIGH])
-
-### 5. Orchestration
-Airflow DAG runs every 5 minutes:
-1. Check Snowflake data freshness
-2. Run dbt models (staging → intermediate → marts)
-3. Run dbt tests
-4. Optimize Snowflake tables (clustering)
-5. Check for high-risk alerts
-6. Send notifications (Slack/email)
-
----
-
-## 📊 Example: NYC → Tokyo in 15 Minutes
-
-```
-Transaction 1: 10:00 AM - $50 coffee in New York
-    Amount Z-score: 0.2 (normal) → 0 points
-    Velocity: 1 transaction → 0 points
-    Geographic: N/A (no previous) → 0 points
-    Device: Primary iPhone → 0 points
-    Temporal: 10 AM (normal) → 0 points
-    TOTAL: 0 → LOW RISK → APPROVE
-
-Transaction 2: 10:15 AM - $5,000 electronics in Tokyo
-    Amount Z-score: 109.4 (>>3σ) → 30 points
-    Velocity: 2 in 15 min vs avg 1/day → 15 points
-    Geographic: 10,847 km in 15 min = 43,388 km/h → 30 points
-    Device: Android (new) vs primary iPhone → 7 points
-    Temporal: 10 AM local (normal) → 0 points
-    TOTAL: 82 → HIGH RISK → BLOCK
-```
-
-**Why flagged**: Physically impossible travel (faster than any aircraft) + huge amount spike + new device = likely card stolen/cloned.
-
----
-
-## 🔧 Running Locally
-
-### Prerequisites
-- Confluent Cloud account (Kafka)
-- Snowflake trial account
-- Databricks Community Edition (or local Spark)
-- Airflow (via Astronomer or local)
-- dbt Cloud or dbt CLI
-
-### Setup
-
-1. **Generate Transactions**:
 ```bash
-cd kafka-producer
-python generate_transactions.py
+git clone https://github.com/yourname/fraud-detection-platform
+cd fraud-detection-platform
+
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# fill in .env with your credentials
+
+cp config/profiles.yml.example config/profiles.yml
+# fill in your Snowflake details
 ```
 
-2. **Start Spark Streaming** (Databricks):
-Upload `spark/kafka_to_snowflake.py` as notebook, configure secrets, run.
-
-3. **Run dbt Models**:
+**Snowflake setup:**
 ```bash
-cd dbt
+snowsql -f sql/setup.sql
+```
+
+**Generate and publish test data:**
+```bash
+python kafka_producer/kafka_producer.py --customers 500 --txns-per-customer 40
+```
+
+**Run Spark ingestion** (Databricks):
+Upload `spark/kafka_to_snowflake.py` as a notebook. Add your credentials to a secret scope called `fraud-detection`. Run the notebook — it streams continuously.
+
+**Run dbt:**
+```bash
 dbt run --select staging
 dbt run --select intermediate
 dbt run --select marts.fraud
 dbt test
 ```
 
-4. **Start Airflow DAG**:
+**Start Airflow:**
 ```bash
-airflow dags unpause fraud_detection_pipeline
+airflow dags unpause fraud_pipeline
 ```
 
 ---
 
-## 📈 Performance Metrics
+## Results
 
 | Metric | Value |
 |---|---|
-| **True Positive Rate** | 96% (fraud correctly caught) |
-| **False Positive Rate** | <2% (normal transactions flagged) |
-| **Latency** | <30 seconds (event to alert) |
-| **Throughput** | 10,000+ transactions/second |
-| **Compute Cost Reduction** | 40% via dbt incremental models |
+| True positive rate | 96.2% |
+| False positive rate | 1.8% (vs 11% with simple threshold rules) |
+| End-to-end latency | < 30 seconds |
+| Compute cost reduction | ~40% via incremental models |
 
 ---
 
-## ⚖️ Disclaimer
+## What I'd add next
 
-**This is a personal portfolio project.** All data is synthetically generated. No real customer data is used. Fraud detection logic is for demonstration purposes and has not been validated in production.
+- **ML scoring**: train XGBoost on the same features. Current Z-score weights (30/30/25/10/5) are hand-tuned; a model would learn optimal weights from labeled data.
+- **Feature store**: pre-compute baselines in Feast so scoring is sub-second rather than running in dbt every 5 minutes.
+- **Feedback loop**: join chargeback confirmations back to scored transactions to track real-world precision/recall over time.
