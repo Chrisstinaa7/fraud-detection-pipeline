@@ -1,0 +1,17 @@
+# credentials
+.env
+config/profiles.yml
+
+# dbt
+target/
+dbt_packages/
+logs/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os
+.DS_Store
