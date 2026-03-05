@@ -1,0 +1,37 @@
+name: fraud_detection
+version: "1.0.0"
+config-version: 2
+
+profile: fraud_detection
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  fraud_detection:
+    staging:
+      +materialized: view
+      +schema: staging
+
+    intermediate:
+      +materialized: incremental
+      +schema: intermediate
+      +on_schema_change: append_new_columns
+
+    marts:
+      fraud:
+        +materialized: incremental
+        +schema: fraud
+        +on_schema_change: fail
+
+vars:
+  baseline_lookback_days: 90
+  high_risk_threshold: 60
+  medium_risk_threshold: 40
+  impossible_speed_kmh: 800   # faster than a commercial flight
