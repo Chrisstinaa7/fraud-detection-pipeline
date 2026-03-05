@@ -1,0 +1,69 @@
+version: 2
+
+sources:
+  - name: raw
+    database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+    schema: raw
+    description: Raw transactions landed by Spark from Kafka. Never modified after insert.
+    tables:
+      - name: transactions
+        columns:
+          - name: transaction_id
+            tests: [unique, not_null]
+          - name: customer_id
+            tests: [not_null]
+          - name: amount
+            tests: [not_null]
+          - name: transaction_timestamp
+            tests: [not_null]
+
+models:
+  - name: stg_transactions
+    description: >
+      Thin view over the raw table. Just type casting and trimming whitespace.
+      Nothing computed here.
+    columns:
+      - name: transaction_id
+        tests: [unique, not_null]
+      - name: amount
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1000000
+
+  - name: int_customer_baseline
+    description: >
+      90-day rolling behavioral profile per customer: average spend, home location,
+      typical hours, burst velocity history, primary device. Incremental — only
+      recalculates for customers who transacted since the last run.
+    columns:
+      - name: customer_id
+        tests: [unique, not_null]
+      - name: avg_amount
+        tests: [not_null]
+
+  - name: mart_fraud_detection
+    description: >
+      Final scored transactions. Each row is one transaction with its total risk
+      score (0-100), risk level, recommended action, and per-dimension breakdown
+      for analyst review.
+    columns:
+      - name: transaction_id
+        tests: [unique, not_null]
+      - name: total_score
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: risk_level
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["LOW", "MEDIUM", "HIGH"]
+      - name: recommended_action
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["APPROVE", "STEP_UP_AUTH", "BLOCK"]
