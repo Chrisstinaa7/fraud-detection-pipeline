@@ -27,6 +27,7 @@ Airflow alerts → Slack
 ```
 
 The key design decision: all fraud logic lives in dbt SQL, not Spark. Spark's only job is moving bytes from Kafka to Snowflake. This makes the scoring logic testable, readable by analysts, and easy to iterate on without touching infrastructure.
+<img width="1024" height="1536" alt="ChatGPT Image Mar 5, 2026, 04_04_52 PM" src="https://github.com/user-attachments/assets/0fb7db03-bccf-45a3-8b50-1c3ca6fbcd98" />
 
 ---
 
@@ -127,7 +128,10 @@ airflow dags unpause fraud_pipeline
 | Compute cost reduction | ~40% via incremental models |
 
 ---
+## Dashboard
+<img width="1400" height="860" alt="dashboard" src="https://github.com/user-attachments/assets/3e34afb8-ec1a-4587-ac32-1308cf2dd6f1" />
 
+---
 ## What I'd add next
 
 - **ML scoring**: train XGBoost on the same features. Current Z-score weights (30/30/25/10/5) are hand-tuned; a model would learn optimal weights from labeled data.
